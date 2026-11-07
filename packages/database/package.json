@@ -1,0 +1,30 @@
+{
+  "name": "@testpilot/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "generate": "prisma generate",
+    "migrate:dev": "dotenv -e ../../.env -- prisma migrate dev",
+    "migrate:deploy": "dotenv -e ../../.env -- prisma migrate deploy",
+    "seed": "dotenv -e ../../.env -- tsx prisma/seed.ts",
+    "postinstall": "prisma generate",
+    "typecheck": "tsc -p tsconfig.json",
+    "migrate:status": "dotenv -e ../../.env -- prisma migrate status",
+    "studio": "dotenv -e ../../.env -- prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.3"
+  },
+  "devDependencies": {
+    "@testpilot/config": "workspace:*",
+    "prisma": "6.19.3",
+    "@testpilot/shared": "workspace:*",
+    "dotenv-cli": "^8.0.0"
+  }
+}

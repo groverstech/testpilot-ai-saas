@@ -1,0 +1,756 @@
+// TestPilot AI — PostgreSQL schema
+// Conventions:
+//  * UUID primary keys (generated in the database via gen_random_uuid()).
+//  * Every tenant-owned row carries `organizationId` (directly or via a parent that does)
+//    so that queries can always be scoped to a tenant.
+//  * snake_case table/column names in the database, camelCase in TypeScript.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+enum Role {
+  OWNER
+  ADMIN
+  DEVELOPER
+  VIEWER
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+enum TokenPurpose {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+}
+
+enum ProjectStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum SecretKind {
+  ENV_VAR
+  TEST_CREDENTIAL
+}
+
+enum GitProvider {
+  GITHUB
+}
+
+enum TestCategory {
+  FUNCTIONAL
+  UI_UX
+  NEGATIVE
+  ACCESSIBILITY
+  PERFORMANCE
+  RESPONSIVE
+}
+
+enum Priority {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum TestRunStatus {
+  QUEUED
+  PREPARING
+  RUNNING
+  PASSED
+  FAILED
+  BLOCKED
+  CANCELLED
+  ERROR
+}
+
+enum TestTrigger {
+  MANUAL
+  PUSH
+  PULL_REQUEST
+  SCHEDULE
+  RETRY
+}
+
+enum ExecutionStatus {
+  PENDING
+  RUNNING
+  PASSED
+  FAILED
+  BLOCKED
+  SKIPPED
+}
+
+enum Severity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum BugStatus {
+  OPEN
+  CONFIRMED
+  IN_PROGRESS
+  RESOLVED
+  WONT_FIX
+  DUPLICATE
+}
+
+enum ArtifactType {
+  SCREENSHOT
+  VIDEO
+  LOG
+  TRACE
+  REPORT_HTML
+  REPORT_PDF
+  OTHER
+}
+
+enum ReportFormat {
+  HTML
+  PDF
+}
+
+enum AgentType {
+  REPOSITORY_ANALYST
+  APPLICATION_EXPLORER
+  TEST_PLANNER
+  TEST_EXECUTOR
+  VISUAL_QA
+  BUG_ANALYST
+  REPORTER
+}
+
+enum AgentStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum PlanTier {
+  FREE
+  PRO
+  TEAM
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+}
+
+enum UsageMetric {
+  TEST_RUN
+  TEST_EXECUTION_MINUTE
+  AI_INPUT_TOKEN
+  AI_OUTPUT_TOKEN
+  STORAGE_BYTE
+}
+
+// ───────────────────────────── Identity ─────────────────────────────
+
+model User {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email           String    @unique @db.Citext
+  name            String
+  passwordHash    String?   @map("password_hash")
+  emailVerifiedAt DateTime? @map("email_verified_at")
+  avatarUrl       String?   @map("avatar_url")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  memberships        OrganizationMember[]
+  sessions           Session[]
+  tokens             UserToken[]
+  invitationsSent    Invitation[]         @relation("InvitationInviter")
+  githubConnections  GitHubConnection[]
+  projectsCreated    Project[]            @relation("ProjectCreator")
+  testRunsTriggered  TestRun[]            @relation("TestRunTriggeredBy")
+  auditLogs          AuditLog[]
+
+  @@map("users")
+}
+
+/// Opaque server-side session. Only the SHA-256 hash of the cookie token is stored.
+model Session {
+  id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId               String    @map("user_id") @db.Uuid
+  tokenHash            String    @unique @map("token_hash")
+  activeOrganizationId String?   @map("active_organization_id") @db.Uuid
+  userAgent            String?   @map("user_agent")
+  ipAddress            String?   @map("ip_address")
+  expiresAt            DateTime  @map("expires_at")
+  lastSeenAt           DateTime  @default(now()) @map("last_seen_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+/// Single-use tokens (email verification, password reset). Only the hash is stored.
+model UserToken {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String       @map("user_id") @db.Uuid
+  purpose    TokenPurpose
+  tokenHash  String       @unique @map("token_hash")
+  expiresAt  DateTime     @map("expires_at")
+  consumedAt DateTime?    @map("consumed_at")
+  createdAt  DateTime     @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+  @@map("user_tokens")
+}
+
+// ───────────────────────────── Tenancy ─────────────────────────────
+
+model Organization {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  members           OrganizationMember[]
+  invitations       Invitation[]
+  workspaces        Workspace[]
+  projects          Project[]
+  githubConnections GitHubConnection[]
+  repositories      Repository[]
+  testRuns          TestRun[]
+  bugs              Bug[]
+  artifacts         Artifact[]
+  reports           Report[]
+  usageRecords      UsageRecord[]
+  subscription      Subscription?
+  auditLogs         AuditLog[]
+
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  userId         String   @map("user_id") @db.Uuid
+  role           Role
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+model Invitation {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String           @map("organization_id") @db.Uuid
+  email          String           @db.Citext
+  role           Role
+  tokenHash      String           @unique @map("token_hash")
+  status         InvitationStatus @default(PENDING)
+  invitedById    String           @map("invited_by_id") @db.Uuid
+  expiresAt      DateTime         @map("expires_at")
+  acceptedAt     DateTime?        @map("accepted_at")
+  createdAt      DateTime         @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  invitedBy    User         @relation("InvitationInviter", fields: [invitedById], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+  @@index([email])
+  @@map("invitations")
+}
+
+model Workspace {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  name           String
+  slug           String
+  isDefault      Boolean  @default(false) @map("is_default")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  projects     Project[]
+
+  @@unique([organizationId, slug])
+  @@map("workspaces")
+}
+
+// ───────────────────────────── Projects ─────────────────────────────
+
+model Project {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String        @map("organization_id") @db.Uuid
+  workspaceId    String        @map("workspace_id") @db.Uuid
+  repositoryId   String?       @map("repository_id") @db.Uuid
+  name           String
+  slug           String
+  description    String?
+  appUrl         String?       @map("app_url")
+  defaultBranch  String?       @map("default_branch")
+  status         ProjectStatus @default(ACTIVE)
+  /// Test configuration (viewports, categories, timeouts…) validated by @testpilot/shared.
+  testSettings   Json          @default("{}") @map("test_settings")
+  createdById    String        @map("created_by_id") @db.Uuid
+  archivedAt     DateTime?     @map("archived_at")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspace    Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Restrict)
+  repository   Repository?     @relation(fields: [repositoryId], references: [id], onDelete: SetNull)
+  createdBy    User            @relation("ProjectCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  secrets      ProjectSecret[]
+  testSuites   TestSuite[]
+  testCases    TestCase[]
+  testRuns     TestRun[]
+  bugs         Bug[]
+  reports      Report[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, status])
+  @@index([workspaceId])
+  @@map("projects")
+}
+
+/// Encrypted environment variables and test credentials (AES-256-GCM, envelope in `encryptedValue`).
+model ProjectSecret {
+  id             String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String     @map("organization_id") @db.Uuid
+  projectId      String     @map("project_id") @db.Uuid
+  kind           SecretKind
+  key            String
+  encryptedValue String     @map("encrypted_value")
+  /// Last few characters for display, only when the value is long enough to not leak it.
+  hint           String?
+  description    String?
+  createdAt      DateTime   @default(now()) @map("created_at")
+  updatedAt      DateTime   @updatedAt @map("updated_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, kind, key])
+  @@index([organizationId])
+  @@map("project_secrets")
+}
+
+// ───────────────────────────── Source control ─────────────────────────────
+
+model GitHubConnection {
+  id                    String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId        String      @map("organization_id") @db.Uuid
+  connectedById         String      @map("connected_by_id") @db.Uuid
+  provider              GitProvider @default(GITHUB)
+  installationId        BigInt?     @map("installation_id")
+  accountLogin          String      @map("account_login")
+  accountType           String      @map("account_type")
+  /// Encrypted OAuth/user token if the OAuth flow is used (never returned by the API).
+  encryptedAccessToken  String?     @map("encrypted_access_token")
+  scopes                String[]    @default([])
+  revokedAt             DateTime?   @map("revoked_at")
+  createdAt             DateTime    @default(now()) @map("created_at")
+  updatedAt             DateTime    @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connectedBy  User         @relation(fields: [connectedById], references: [id], onDelete: Restrict)
+  repositories Repository[]
+
+  @@unique([organizationId, provider, accountLogin])
+  @@map("github_connections")
+}
+
+model Repository {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  connectionId   String   @map("connection_id") @db.Uuid
+  externalId     BigInt   @map("external_id")
+  fullName       String   @map("full_name")
+  isPrivate      Boolean  @map("is_private")
+  defaultBranch  String   @map("default_branch")
+  htmlUrl        String   @map("html_url")
+  /// Structured output of the Repository Analyst agent (Phase 2).
+  analysis       Json?
+  analyzedAt     DateTime? @map("analyzed_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connection   GitHubConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  branches     Branch[]
+  commits      Commit[]
+  projects     Project[]
+
+  @@unique([organizationId, externalId])
+  @@map("repositories")
+}
+
+model Branch {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  repositoryId String   @map("repository_id") @db.Uuid
+  name         String
+  headSha      String?  @map("head_sha")
+  isProtected  Boolean  @default(false) @map("is_protected")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+
+  @@unique([repositoryId, name])
+  @@map("branches")
+}
+
+model Commit {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  repositoryId String   @map("repository_id") @db.Uuid
+  sha          String
+  message      String
+  authorName   String?  @map("author_name")
+  authorEmail  String?  @map("author_email")
+  committedAt  DateTime @map("committed_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  testRuns   TestRun[]
+
+  @@unique([repositoryId, sha])
+  @@map("commits")
+}
+
+// ───────────────────────────── Testing ─────────────────────────────
+
+model TestSuite {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId   String   @map("project_id") @db.Uuid
+  name        String
+  description String?
+  isRegression Boolean @default(false) @map("is_regression")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  testCases TestCase[]
+
+  @@index([projectId])
+  @@map("test_suites")
+}
+
+model TestCase {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId      String       @map("project_id") @db.Uuid
+  suiteId        String?      @map("suite_id") @db.Uuid
+  /// Human-readable, per-project identifier, e.g. "TC-0042".
+  key            String
+  name           String
+  description    String?
+  category       TestCategory
+  priority       Priority     @default(MEDIUM)
+  preconditions  String[]     @default([])
+  steps          Json         @default("[]")
+  expectedResult String       @map("expected_result")
+  testData       Json?        @map("test_data")
+  viewport       String?
+  generatedBy    AgentType?   @map("generated_by")
+  isActive       Boolean      @default(true) @map("is_active")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+
+  project    Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  suite      TestSuite?      @relation(fields: [suiteId], references: [id], onDelete: SetNull)
+  executions TestExecution[]
+
+  @@unique([projectId, key])
+  @@index([projectId, category])
+  @@map("test_cases")
+}
+
+model TestRun {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String        @map("organization_id") @db.Uuid
+  projectId      String        @map("project_id") @db.Uuid
+  commitId       String?       @map("commit_id") @db.Uuid
+  /// Human-readable, per-project sequence number.
+  number         Int
+  status         TestRunStatus @default(QUEUED)
+  trigger        TestTrigger   @default(MANUAL)
+  branch         String?
+  commitSha      String?       @map("commit_sha")
+  triggeredById  String?       @map("triggered_by_id") @db.Uuid
+  retryOfId      String?       @map("retry_of_id") @db.Uuid
+  totalTests     Int           @default(0) @map("total_tests")
+  passedTests    Int           @default(0) @map("passed_tests")
+  failedTests    Int           @default(0) @map("failed_tests")
+  blockedTests   Int           @default(0) @map("blocked_tests")
+  skippedTests   Int           @default(0) @map("skipped_tests")
+  blockedReason  String?       @map("blocked_reason")
+  startedAt      DateTime?     @map("started_at")
+  finishedAt     DateTime?     @map("finished_at")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project         Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  commit          Commit?          @relation(fields: [commitId], references: [id], onDelete: SetNull)
+  triggeredBy     User?            @relation("TestRunTriggeredBy", fields: [triggeredById], references: [id], onDelete: SetNull)
+  retryOf         TestRun?         @relation("TestRunRetry", fields: [retryOfId], references: [id], onDelete: SetNull)
+  retries         TestRun[]        @relation("TestRunRetry")
+  executions      TestExecution[]
+  bugs            Bug[]
+  artifacts       Artifact[]
+  reports         Report[]
+  agentExecutions AgentExecution[]
+
+  @@unique([projectId, number])
+  @@index([organizationId, createdAt])
+  @@index([projectId, status])
+  @@map("test_runs")
+}
+
+model TestExecution {
+  id          String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  testRunId   String          @map("test_run_id") @db.Uuid
+  testCaseId  String          @map("test_case_id") @db.Uuid
+  status      ExecutionStatus @default(PENDING)
+  viewport    String?
+  browser     String          @default("chromium")
+  durationMs  Int?            @map("duration_ms")
+  errorMessage String?        @map("error_message")
+  consoleLogs Json?           @map("console_logs")
+  networkErrors Json?         @map("network_errors")
+  startedAt   DateTime?       @map("started_at")
+  finishedAt  DateTime?       @map("finished_at")
+  createdAt   DateTime        @default(now()) @map("created_at")
+
+  testRun     TestRun      @relation(fields: [testRunId], references: [id], onDelete: Cascade)
+  testCase    TestCase     @relation(fields: [testCaseId], references: [id], onDelete: Cascade)
+  steps       TestStep[]
+  screenshots Screenshot[]
+  bugs        Bug[]
+
+  @@index([testRunId, status])
+  @@index([testCaseId])
+  @@map("test_executions")
+}
+
+model TestStep {
+  id           String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  executionId  String          @map("execution_id") @db.Uuid
+  index        Int
+  action       String
+  target       String?
+  value        String?
+  status       ExecutionStatus @default(PENDING)
+  durationMs   Int?            @map("duration_ms")
+  errorMessage String?         @map("error_message")
+  createdAt    DateTime        @default(now()) @map("created_at")
+
+  execution   TestExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  screenshots Screenshot[]
+
+  @@unique([executionId, index])
+  @@map("test_steps")
+}
+
+model Bug {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  projectId      String    @map("project_id") @db.Uuid
+  testRunId      String?   @map("test_run_id") @db.Uuid
+  executionId    String?   @map("execution_id") @db.Uuid
+  key            String
+  title          String
+  severity       Severity
+  status         BugStatus @default(OPEN)
+  affectedPage   String?   @map("affected_page")
+  affectedComponent String? @map("affected_component")
+  reproductionSteps String[] @default([]) @map("reproduction_steps")
+  expectedResult String?   @map("expected_result")
+  actualResult   String?   @map("actual_result")
+  suggestedFix   String?   @map("suggested_fix")
+  /// 0..1 — the analysing agent's confidence. Speculative findings are not stored as bugs.
+  confidence     Float?
+  /// Stable hash used to match the same defect across runs (regression tracking).
+  fingerprint    String?
+  firstSeenRunId String?   @map("first_seen_run_id") @db.Uuid
+  resolvedAt     DateTime? @map("resolved_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project      Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  testRun      TestRun?       @relation(fields: [testRunId], references: [id], onDelete: SetNull)
+  execution    TestExecution? @relation(fields: [executionId], references: [id], onDelete: SetNull)
+  screenshots  Screenshot[]
+
+  @@unique([projectId, key])
+  @@index([organizationId, status, severity])
+  @@index([projectId, fingerprint])
+  @@map("bugs")
+}
+
+model Artifact {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  testRunId      String?      @map("test_run_id") @db.Uuid
+  type           ArtifactType
+  /// Object storage key: test-results/{projectId}/{testRunId}/{folder}/{file}
+  storageKey     String       @unique @map("storage_key")
+  contentType    String       @map("content_type")
+  sizeBytes      BigInt       @map("size_bytes")
+  checksum       String?
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  testRun      TestRun?     @relation(fields: [testRunId], references: [id], onDelete: Cascade)
+  screenshot   Screenshot?
+  report       Report?
+
+  @@index([organizationId])
+  @@index([testRunId, type])
+  @@map("artifacts")
+}
+
+model Screenshot {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  artifactId  String   @unique @map("artifact_id") @db.Uuid
+  executionId String?  @map("execution_id") @db.Uuid
+  stepId      String?  @map("step_id") @db.Uuid
+  bugId       String?  @map("bug_id") @db.Uuid
+  /// functional | ui-ux | responsive | negative | failed-tests | annotated
+  folder      String
+  viewport    String
+  width       Int
+  height      Int
+  pageUrl     String?  @map("page_url")
+  isAnnotated Boolean  @default(false) @map("is_annotated")
+  annotations Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  artifact  Artifact       @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  execution TestExecution? @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  step      TestStep?      @relation(fields: [stepId], references: [id], onDelete: SetNull)
+  bug       Bug?           @relation(fields: [bugId], references: [id], onDelete: SetNull)
+
+  @@index([executionId])
+  @@map("screenshots")
+}
+
+model Report {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  projectId      String       @map("project_id") @db.Uuid
+  testRunId      String       @map("test_run_id") @db.Uuid
+  artifactId     String?      @unique @map("artifact_id") @db.Uuid
+  format         ReportFormat
+  summary        Json?
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  project      Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  testRun      TestRun      @relation(fields: [testRunId], references: [id], onDelete: Cascade)
+  artifact     Artifact?    @relation(fields: [artifactId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@map("reports")
+}
+
+model AgentExecution {
+  id           String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  testRunId    String      @map("test_run_id") @db.Uuid
+  agent        AgentType
+  status       AgentStatus @default(PENDING)
+  model        String?
+  inputTokens  Int         @default(0) @map("input_tokens")
+  outputTokens Int         @default(0) @map("output_tokens")
+  /// Structured agent output (validated against the agent's output schema).
+  output       Json?
+  errorMessage String?     @map("error_message")
+  startedAt    DateTime?   @map("started_at")
+  finishedAt   DateTime?   @map("finished_at")
+  createdAt    DateTime    @default(now()) @map("created_at")
+
+  testRun TestRun @relation(fields: [testRunId], references: [id], onDelete: Cascade)
+
+  @@index([testRunId, agent])
+  @@map("agent_executions")
+}
+
+// ───────────────────────────── Commercial ─────────────────────────────
+
+model Subscription {
+  id                   String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId       String             @unique @map("organization_id") @db.Uuid
+  plan                 PlanTier           @default(FREE)
+  status               SubscriptionStatus @default(ACTIVE)
+  provider             String?
+  providerCustomerId   String?            @unique @map("provider_customer_id")
+  providerSubscriptionId String?          @unique @map("provider_subscription_id")
+  currentPeriodStart   DateTime?          @map("current_period_start")
+  currentPeriodEnd     DateTime?          @map("current_period_end")
+  cancelAtPeriodEnd    Boolean            @default(false) @map("cancel_at_period_end")
+  createdAt            DateTime           @default(now()) @map("created_at")
+  updatedAt            DateTime           @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+}
+
+model UsageRecord {
+  id             String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String      @map("organization_id") @db.Uuid
+  metric         UsageMetric
+  quantity       BigInt
+  referenceId    String?     @map("reference_id")
+  occurredAt     DateTime    @default(now()) @map("occurred_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, metric, occurredAt])
+  @@map("usage_records")
+}
+
+model AuditLog {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String?  @map("organization_id") @db.Uuid
+  actorId        String?  @map("actor_id") @db.Uuid
+  action         String
+  targetType     String?  @map("target_type")
+  targetId       String?  @map("target_id")
+  /// Redacted metadata — never contains secrets.
+  metadata       Json?
+  ipAddress      String?  @map("ip_address")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actor        User?         @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([actorId])
+  @@map("audit_logs")
+}
